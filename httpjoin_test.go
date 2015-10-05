@@ -40,7 +40,7 @@ func TestHandler(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

@@ -1,4 +1,4 @@
-package httpjoin
+package httpjoin // name..? broadcaster ..? uniquerequest ..? uniquehttp ?
 
 import (
 	"bytes"
@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync"
 )
+
+// TODO: unexport the writers here...?
 
 func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 	var requestsMu sync.Mutex
@@ -18,30 +20,31 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 
 			var reqKey = fmt.Sprintf("%s %s", r.Method, r.URL.RequestURI())
 			var bw *BroadcastWriter
+			var lw *listener
 
 			requestsMu.Lock()
 			bw, ok := requests[reqKey]
 			if ok {
-				bw.Writers = append(bw.Writers, w)
+				lw = newListener(w)
+				_ = bw.AddListener(lw)
+				// TODO: if false.. then, just go to next.ServeHTTP(w, r)
+				// ...
 			}
 			requestsMu.Unlock()
 
 			if ok {
 				// existing request listening for the stuff..
+				log.Println("waiting for existing request..")
 
-				// hmm, we need a synchronizing channel here to
-				// wait until we're done.
-				// for/select ....?
-				log.Println("waiting for existing request.. listening on bw.Done()..")
+				// TODO: hmm.. do we have a listener timeout..?
+				// after that point, we close it up.. etc..?
+				// ie. what if the first handler never responds..?
+				// .. we should probably use context.Context ..
+				// or, have a options with a timeout..
 
-				// this wont work.. we need a doneCh for each writer
-				// ..
-
-				for {
-					select {
-					case <-bw.Done():
-						return
-					}
+				select {
+				case <-lw.Done():
+					return
 				}
 				return
 			}
@@ -58,46 +61,103 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 			// Remove the request key from the map in case a request comes
 			// in while we're writing to the listeners
 			requestsMu.Lock()
-			rbw := requests[reqKey] // necessary..? its a pointer..
 			delete(requests, reqKey)
 			requestsMu.Unlock()
 
-			rbw.Flush()
+			bw.Flush()
 		})
 	}
 }
 
-type BroadcastWriter struct {
-	Writers []http.ResponseWriter
-	header  http.Header
-	bufw    *bytes.Buffer
-
-	headerSent bool
-
-	// flushMu sync.Mutex
-	flushed bool
-
-	doneCh chan struct{}
+type listener struct {
+	// ID int64
+	http.ResponseWriter
+	headerSentCh chan struct{}
+	flushedCh    chan struct{}
 }
 
-func NewBroadcastWriter(w ...http.ResponseWriter) *BroadcastWriter {
-	return &BroadcastWriter{
-		Writers: []http.ResponseWriter(w),
-		header:  http.Header{},
-		bufw:    &bytes.Buffer{},
-		doneCh:  make(chan struct{}),
+func newListener(w http.ResponseWriter) *listener {
+	return &listener{
+		ResponseWriter: w,
+		headerSentCh:   make(chan struct{}, 1),
+		flushedCh:      make(chan struct{}, 1),
 	}
 }
 
-func (w *BroadcastWriter) AddListener(lw http.ResponseWriter, doneCh chan<- struct{}) {
-	//??
+// func (lw *listener) WriteHeader(status int) {
+// 	select {
+// 	case <-lw.headerSentCh:
+// 		log.Println("listener: WriteHeader(), case <-lw.headerSentCh")
+// 	default:
+// 		log.Println("listener: WriteHeader(), default")
+//
+// 		// lw.headerSentCh <- struct{}{}
+// 		lw.ResponseWriter.WriteHeader(status)
+// 		close(lw.headerSentCh)
+// 	}
+// }
+
+// func (lw *listener) Write(p [][]byte) (int, error) {
+// 	// select {
+// 	// case ....
+// 	// }
+// }
+
+func (lw *listener) Done() <-chan struct{} {
+	return lw.flushedCh
 }
+
+// TODO: gotta implement Write() and WriteHeader() ...
+// just to block on headerSentCh()
+// .. and to close it..?
+
+type BroadcastWriter struct { // Rename Broadcaster ...?
+	listeners []*listener
+	header    http.Header
+	bufw      *bytes.Buffer
+
+	headerSent bool
+	// headerSentMu sync.Mutex
+
+	flushed bool
+	// flushCh    chan struct{} // channel of channels...?
+}
+
+func NewBroadcastWriter(w http.ResponseWriter) *BroadcastWriter {
+	return &BroadcastWriter{
+		listeners: []*listener{newListener(w)},
+		header:    http.Header{},
+		bufw:      &bytes.Buffer{},
+		// flushCh:   make(chan struct{}),
+	}
+}
+
+// TODO: we should add a bool to confirm
+// the listener was added.. and a lock on headerSentMu perhaps,
+// cuz, once the header is sent, we can't accept any more listeners..
+func (w *BroadcastWriter) AddListener(lw *listener) bool {
+	// w.headerSentMu.Lock()
+	// defer w.headerSentMu.Unlock()
+
+	if w.headerSent {
+		return false
+	}
+
+	w.listeners = append(w.listeners, lw)
+	return true
+}
+
+// TODO: RemoveListener ...?
+// or Subscribe() and Unsubscribe() ?
 
 func (w *BroadcastWriter) Header() http.Header {
 	return w.header
 }
 
 func (w *BroadcastWriter) Write(p []byte) (int, error) {
+	// w.headerSentMu.Lock()
+	// defer w.headerSentMu.Unlock()
+
 	if !w.headerSent {
 		w.WriteHeader(http.StatusOK)
 	}
@@ -105,30 +165,27 @@ func (w *BroadcastWriter) Write(p []byte) (int, error) {
 }
 
 func (w *BroadcastWriter) WriteHeader(status int) {
+	// w.headerSentMu.Lock()
+	// defer w.headerSentMu.Unlock()
+
 	if w.headerSent {
 		return
 	}
 	w.headerSent = true
 
-	// TODO: we cant do this synchronization here............
+	log.Println("listeners...?", len(w.listeners))
 
-	var wg sync.WaitGroup
-
-	for _, ww := range w.Writers {
-		wg.Add(1)
-		go func(ww http.ResponseWriter, status int, header http.Header) {
-			defer wg.Done()
-
-			h := map[string][]string(ww.Header())
+	for _, lw := range w.listeners {
+		go func(lw *listener, status int, header http.Header) {
+			h := map[string][]string(lw.Header())
 			for k, v := range header {
-				// h.Set(k, v)
 				h[k] = v
 			}
-			ww.WriteHeader(status)
-		}(ww, status, w.header)
+			// lw.headerSent = true
+			lw.WriteHeader(status)
+			lw.headerSentCh <- struct{}{}
+		}(lw, status, w.header)
 	}
-
-	wg.Wait()
 }
 
 // how does http streaming work...? can we broadcast streaming...?
@@ -137,8 +194,10 @@ func (w *BroadcastWriter) WriteHeader(status int) {
 // what happens to connections normally after a request..? etc.?
 func (w *BroadcastWriter) Flush() {
 	if w.flushed {
+		// TODO: should we print an error or something...?
 		return
 	}
+	w.flushed = true
 
 	log.Println("flushing..")
 
@@ -146,39 +205,15 @@ func (w *BroadcastWriter) Flush() {
 
 	data := w.bufw.Bytes()
 
-	var wg sync.WaitGroup
+	for _, lw := range w.listeners {
+		go func(lw *listener, data []byte) {
+			// hmm.. block until headerSentCh ... ?
 
-	for _, ww := range w.Writers {
-		wg.Add(1)
-		go func(ww http.ResponseWriter, data []byte) {
-			defer wg.Done()
-			// ww.WriteHeader(status)
-			// hmm.. we can clone the map maybe..?
-			ww.Write(data)
-		}(ww, data)
+			lw.Write(data)
+			// if lw.flushedCh != nil {
+			close(lw.flushedCh)
+			// lw.flushedCh <- struct{}{}
+			// }
+		}(lw, data)
 	}
-
-	wg.Wait()
-	close(w.doneCh)
-
-	// hmm.. set flushed...?
-	// .. reset Body ...?
-
-	// hmm.. do we collect all the response writers..?
-	// not just one Response.. but all..
-	// a slice of response writers..?
-
-	// w.Response.WriteHeader(w.Status)
-	// if w.Body.Len() > 0 {
-	// 	_, err := w.Response.Write(w.Body.Bytes())
-	// 	if err != nil {
-	// 		panic(err)
-	// 	}
-	// 	w.Body.Reset()
-	// }
-	w.flushed = true
-}
-
-func (w *BroadcastWriter) Done() <-chan struct{} {
-	return w.doneCh
 }
