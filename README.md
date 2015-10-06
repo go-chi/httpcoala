@@ -48,12 +48,12 @@ on a web service that downloads an image and returns a resized version.
 
 ```
 Without httpcoala middleware, Requests/sec:   7081.09
-  With httpcoala middleware, Requests/sec:   18373.87
+   With httpcoala middleware, Requests/sec:  18373.87
 ```
 
 # License
 
-Brought to you by the Pressly Go team - www.pressly.com / github.com/pressly
+Brought to you by the Pressly Go team - www.pressly.com / https://github.com/pressly
 
 MIT License
 
