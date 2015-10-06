@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestHandler(t *testing.T) {
@@ -23,7 +24,7 @@ func TestHandler(t *testing.T) {
 
 		// TODO: also test this with no sleep
 
-		// time.Sleep(100 * time.Millisecond) // slow handler
+		time.Sleep(100 * time.Millisecond) // slow handler
 		w.Header().Set("X-Httpjoin", "test")
 		w.WriteHeader(expectedStatus)
 		w.Write(expectedBody)
@@ -51,7 +52,7 @@ func TestHandler(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

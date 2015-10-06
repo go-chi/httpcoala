@@ -42,7 +42,6 @@ func Route(methods ...string) func(next http.Handler) http.Handler {
 			cw, exists = requests[reqKey]
 			if exists {
 				ww, exists = cw.AddWriter(w)
-				delete(requests, reqKey)
 			}
 			if !exists {
 				log.Println("!!!!! SET requests[reqKey] !!!!!") //, len(cw.writers))
@@ -103,8 +102,7 @@ type coalescer struct {
 	wroteHeader uint32
 	flushed     uint32
 
-	mu   sync.Mutex
-	once sync.Once
+	mu sync.Mutex
 }
 
 func newCoalescer(w http.ResponseWriter) *coalescer {
@@ -152,37 +150,38 @@ func (cw *coalescer) Write(p []byte) (int, error) {
 func (cw *coalescer) WriteHeader(status int) {
 	log.Println("broadcastwriter: WriterHeader(), wroteHeader:", atomic.LoadUint32(&cw.wroteHeader))
 
-	cw.once.Do(func() {
-		if !atomic.CompareAndSwapUint32(&cw.wroteHeader, 0, 1) {
-			return
-		}
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
 
-		// if atomic.LoadUint32(&cw.wroteHeader) > 0 {
-		// 	return
-		// }
-		// atomic.AddUint32(&cw.wroteHeader, 1)
+	if !atomic.CompareAndSwapUint32(&cw.wroteHeader, 0, 1) {
+		return
+	}
 
-		log.Println("listeners...?", len(cw.writers))
+	// if atomic.LoadUint32(&cw.wroteHeader) > 0 {
+	// 	return
+	// }
+	// atomic.AddUint32(&cw.wroteHeader, 1)
 
-		// w.mu.Lock()
-		// defer w.mu.Unlock()
+	log.Println("listeners...?", len(cw.writers))
 
-		for _, ww := range cw.writers {
-			log.Printf("=====> writeHeader() id:%d", ww.ID)
-			go func(ww *writer, status int, header http.Header) {
-				h := map[string][]string(ww.Header())
-				for k, v := range header {
-					h[k] = v
-				}
-				h["X-Coalesce"] = []string{"hit"}
-				h["X-ID"] = []string{fmt.Sprintf("%d", ww.ID)}
+	// w.mu.Lock()
+	// defer w.mu.Unlock()
 
-				ww.WriteHeader(status)
-				// ww.wroteHeaderCh <- struct{}{}
-				close(ww.wroteHeaderCh)
-			}(ww, status, cw.header)
-		}
-	})
+	for _, ww := range cw.writers {
+		log.Printf("=====> writeHeader() id:%d", ww.ID)
+		go func(ww *writer, status int, header http.Header) {
+			h := map[string][]string(ww.Header())
+			for k, v := range header {
+				h[k] = v
+			}
+			h["X-Coalesce"] = []string{"hit"}
+			h["X-ID"] = []string{fmt.Sprintf("%d", ww.ID)}
+
+			ww.WriteHeader(status)
+			// ww.wroteHeaderCh <- struct{}{}
+			close(ww.wroteHeaderCh)
+		}(ww, status, cw.header)
+	}
 }
 
 // how does http streaming work...? can we broadcast streaming...?
