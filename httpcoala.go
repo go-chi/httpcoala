@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // TODO: unexport the writers here...?
@@ -54,26 +53,17 @@ func Route(methods ...string) func(next http.Handler) http.Handler {
 				// existing request listening for the stuff..
 				log.Printf("waiting for existing request id:%d", ww.ID)
 
-				// TODO: hmm.. do we have a listener timeout..?
-				// after that point, we close it up.. etc..?
-				// ie. what if the first handler never responds..?
-				// .. we should probably use context.Context ..
-				// or, have a options with a timeout..
-				// or, leave it up to other middlewares
-				// to stop the first handler, which will broadcast
-				// all others.
-
-				for {
-					select {
-					case <-ww.Flushed():
-						return
-					case <-time.After(3 * time.Second):
-						log.Printf("********************************** FORCE CLOSE ******************* id:%d", ww.ID)
-						ww.TmpCloseFlushCh()
-					}
-				}
-				// <-ww.Flushed()
-				// return
+				// for {
+				// 	select {
+				// 	case <-ww.Flushed():
+				// 		return
+				// 	case <-time.After(3 * time.Second):
+				// 		log.Printf("********************************** FORCE CLOSE ******************* id:%d", ww.ID)
+				// 		ww.TmpCloseFlushCh()
+				// 	}
+				// }
+				<-ww.Flushed()
+				return
 			}
 
 			log.Println("sending request to next.ServeHTTP(cw,r)")
@@ -141,9 +131,9 @@ func (cw *coalescer) Header() http.Header {
 
 func (cw *coalescer) Write(p []byte) (int, error) {
 	log.Println("broadcastwriter: Write(), wroteHeader:", atomic.LoadUint32(&cw.wroteHeader))
-	// if atomic.LoadUint32(&cw.wroteHeader) == 0 {
-	// 	cw.WriteHeader(http.StatusOK)
-	// }
+	if atomic.LoadUint32(&cw.wroteHeader) == 0 {
+		cw.WriteHeader(http.StatusOK)
+	}
 	return cw.bufw.Write(p)
 }
 
@@ -178,7 +168,6 @@ func (cw *coalescer) WriteHeader(status int) {
 			h["X-ID"] = []string{fmt.Sprintf("%d", ww.ID)}
 
 			ww.WriteHeader(status)
-			// ww.wroteHeaderCh <- struct{}{}
 			close(ww.wroteHeaderCh)
 		}(ww, status, cw.header)
 	}
@@ -209,9 +198,6 @@ func (cw *coalescer) Flush() {
 
 	log.Println("flushing..")
 
-	// w.mu.Lock()
-	// defer w.mu.Unlock()
-
 	data := cw.bufw.Bytes()
 
 	for _, ww := range cw.writers {
@@ -227,7 +213,6 @@ func (cw *coalescer) Flush() {
 			// Write the data to the original response writer
 			// and signal to the flush channel once complete.
 			ww.Write(data)
-			// ww.flushedCh <- struct{}{}
 
 			log.Printf("=====> write() closing flushedCh for id:%d", ww.ID)
 
