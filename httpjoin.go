@@ -11,6 +11,10 @@ import (
 
 // TODO: unexport the writers here...?
 
+// TODO: what does nginx call this kind of behaviour..?
+//       "" - varnish?
+//       "" - haproxy?
+
 var (
 	counter int64 = 1
 )
@@ -23,12 +27,15 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			log.Println("broadcast handler..")
 
+			// TODO: take a hash of the method+path to generate the key instead
+
 			var reqKey = fmt.Sprintf("%s %s", r.Method, r.URL.RequestURI())
 			var bw *BroadcastWriter
 			var lw *listener
+			var ok bool
 
 			requestsMu.Lock()
-			bw, ok := requests[reqKey]
+			bw, ok = requests[reqKey]
 			if ok {
 				id := atomic.LoadInt64(&counter)
 				atomic.AddInt64(&counter, 1)
@@ -36,14 +43,15 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 				lw = newListener(w, id)
 				x := bw.AddListener(lw)
 				if !x {
-					panic("couldnt add listener..")
+					// panic("couldnt add listener..")
+					ok = false
 				}
 				// TODO: if false.. then, just go to next.ServeHTTP(w, r)
 				// ...
 			}
 			requestsMu.Unlock()
 
-			if ok {
+			if ok { // or lw != nil ...?
 				// existing request listening for the stuff..
 				log.Println("waiting for existing request..")
 
@@ -52,9 +60,12 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 				// ie. what if the first handler never responds..?
 				// .. we should probably use context.Context ..
 				// or, have a options with a timeout..
+				// or, leave it up to other middlewares
+				// to stop the first handler, which will broadcast
+				// all others.
 
 				select {
-				case <-lw.Done():
+				case <-lw.Flushed():
 					return
 				}
 				return
@@ -77,35 +88,13 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 			requestsMu.Unlock()
 
 			bw.Flush()
-			// bw.Flush() // test.. call .Flush() again here..
+			select {
+			case <-bw.Flushed():
+				return
+			}
 		})
 	}
 }
-
-type listener struct {
-	ID int64
-	http.ResponseWriter
-	wroteHeaderCh chan struct{}
-	flushedCh     chan struct{}
-}
-
-func newListener(w http.ResponseWriter, id int64) *listener {
-	log.Println("newListener, id:", id)
-	return &listener{
-		ID:             id,
-		ResponseWriter: w,
-		wroteHeaderCh:  make(chan struct{}, 1),
-		flushedCh:      make(chan struct{}, 1),
-	}
-}
-
-func (lw *listener) Done() <-chan struct{} {
-	return lw.flushedCh
-}
-
-// TODO: gotta implement Write() and WriteHeader() ...
-// just to block on headerSentCh()
-// .. and to close it..?
 
 type BroadcastWriter struct { // Rename Broadcaster ...?
 	listeners []*listener
@@ -129,9 +118,6 @@ func NewBroadcastWriter(w http.ResponseWriter) *BroadcastWriter {
 	}
 }
 
-// TODO: we should add a bool to confirm
-// the listener was added.. and a lock on headerSentMu perhaps,
-// cuz, once the header is sent, we can't accept any more listeners..
 func (w *BroadcastWriter) AddListener(lw *listener) bool {
 	if atomic.LoadUint32(&w.wroteHeader) > 0 {
 		return false
@@ -140,23 +126,17 @@ func (w *BroadcastWriter) AddListener(lw *listener) bool {
 	// note: we need to synchronize the listeners..
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	w.listeners = append(w.listeners, lw)
 	return true
 }
-
-// TODO: RemoveListener ...?
-// or Subscribe() and Unsubscribe() ?
 
 func (w *BroadcastWriter) Header() http.Header {
 	return w.header
 }
 
 func (w *BroadcastWriter) Write(p []byte) (int, error) {
-	// hmm.. should we have a separate buffer for each listener..?
-	// TODO: sycnrhonized?
-	// w.mu.Lock()
-	// defer w.mu.Unlock()
-
+	log.Println("broadcastwriter: Write(), wroteHeader:", atomic.LoadUint32(&w.wroteHeader))
 	if atomic.LoadUint32(&w.wroteHeader) == 0 {
 		w.WriteHeader(http.StatusOK)
 	}
@@ -164,7 +144,7 @@ func (w *BroadcastWriter) Write(p []byte) (int, error) {
 }
 
 func (w *BroadcastWriter) WriteHeader(status int) {
-	log.Println("Broadcast WriterHeader():.", atomic.LoadUint32(&w.wroteHeader))
+	log.Println("broadcastwriter: WriterHeader(), wroteHeader:", atomic.LoadUint32(&w.wroteHeader))
 	if atomic.LoadUint32(&w.wroteHeader) > 0 {
 		return
 	}
@@ -216,7 +196,7 @@ func (w *BroadcastWriter) Flush() {
 		go func(lw *listener, data []byte) {
 			// Block until the header has been written
 			<-lw.wroteHeaderCh
-			// close(lw.wroteHeaderCh) // ..?
+			close(lw.wroteHeaderCh) // ..?
 
 			log.Println("=====> write()", lw.ID, "-", string(data))
 
@@ -227,3 +207,32 @@ func (w *BroadcastWriter) Flush() {
 		}(lw, data)
 	}
 }
+
+func (w *BroadcastWriter) Flushed() <-chan struct{} {
+	return w.listeners[0].flushedCh
+}
+
+type listener struct {
+	ID int64
+	http.ResponseWriter
+	wroteHeaderCh chan struct{}
+	flushedCh     chan struct{}
+}
+
+func newListener(w http.ResponseWriter, id int64) *listener {
+	log.Println("newListener, id:", id)
+	return &listener{
+		ID:             id,
+		ResponseWriter: w,
+		wroteHeaderCh:  make(chan struct{}, 1),
+		flushedCh:      make(chan struct{}, 1),
+	}
+}
+
+func (lw *listener) Flushed() <-chan struct{} {
+	return lw.flushedCh
+}
+
+// TODO: gotta implement Write() and WriteHeader() ...
+// just to block on headerSentCh()
+// .. and to close it..?

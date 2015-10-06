@@ -22,6 +22,8 @@ func TestHandler(t *testing.T) {
 
 		atomic.AddUint32(&hits, 1)
 
+		// TODO: also test this with no sleep
+
 		time.Sleep(100 * time.Millisecond) // slow handler
 		w.Header().Set("X-Httpjoin", "test")
 		w.WriteHeader(expectedStatus)
@@ -76,6 +78,6 @@ func TestHandler(t *testing.T) {
 
 	totalHits := atomic.LoadUint32(&hits)
 	if totalHits > 1 {
-		t.Fatal("handler was hit more than once..")
+		t.Fatal("handler was hit more than once. hits:", totalHits)
 	}
 }
