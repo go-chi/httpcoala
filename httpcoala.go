@@ -5,18 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
-
-// TODO: unexport the writers here...?
-
-// TODO: will this work with consistentrd ..?
-
-// TODO: closing these connections...?
-
-// TODO: what happens if something panics in the app handler..? add test case.
-// can we close the others..?
 
 var (
 	counter int64 = 1
@@ -24,15 +16,23 @@ var (
 
 func Route(methods ...string) func(next http.Handler) http.Handler {
 	var requestsMu sync.Mutex
-	requests := make(map[string]*coalescer)
+	requests := make(map[request]*coalescer)
+
+	methodTest := make(map[string]struct{}, len(methods))
+	for _, m := range methods {
+		methodTest[strings.ToUpper(m)] = struct{}{}
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			log.Println("broadcast handler..")
 
-			// TODO: take a hash of the method+path to generate the key instead
+			if _, ok := methodTest[r.Method]; !ok {
+				next.ServeHTTP(w, r)
+				return
+			}
 
-			var reqKey = fmt.Sprintf("%s %s", r.Method, r.URL.RequestURI())
+			var reqKey = request{r.Method, r.URL.RequestURI()}
 			var cw *coalescer
 			var ww *writer
 			var exists bool
@@ -53,33 +53,23 @@ func Route(methods ...string) func(next http.Handler) http.Handler {
 				// existing request listening for the stuff..
 				log.Printf("waiting for existing request id:%d", ww.ID)
 
-				// for {
-				// 	select {
-				// 	case <-ww.Flushed():
-				// 		return
-				// 	case <-time.After(3 * time.Second):
-				// 		log.Printf("********************************** FORCE CLOSE ******************* id:%d", ww.ID)
-				// 		ww.TmpCloseFlushCh()
-				// 	}
-				// }
 				<-ww.Flushed()
 				return
 			}
 
+			defer func() {
+				// Remove the request key from the map in case a request comes
+				// in while we're writing to the listeners
+				requestsMu.Lock()
+				delete(requests, reqKey)
+				requestsMu.Unlock()
+
+				cw.Flush()
+				<-cw.Flushed()
+			}()
+
 			log.Println("sending request to next.ServeHTTP(cw,r)")
 			next.ServeHTTP(cw, r)
-
-			// Remove the request key from the map in case a request comes
-			// in while we're writing to the listeners
-			requestsMu.Lock()
-			delete(requests, reqKey)
-			requestsMu.Unlock()
-
-			// TODO: hmm. put this in a defer func() {} ..?
-			// same with requestsMu ..? and put it above next.ServeHTTP() ..?
-			cw.Flush()
-			<-cw.Flushed()
-			return
 		})
 	}
 }
@@ -107,9 +97,6 @@ func newCoalescer(w http.ResponseWriter) *coalescer {
 }
 
 func (cw *coalescer) AddWriter(w http.ResponseWriter) (*writer, bool) {
-	cw.mu.Lock()
-	defer cw.mu.Unlock()
-
 	if atomic.LoadUint32(&cw.wroteHeader) > 0 {
 		return nil, false
 	}
@@ -117,8 +104,8 @@ func (cw *coalescer) AddWriter(w http.ResponseWriter) (*writer, bool) {
 	id := atomic.LoadInt64(&counter)
 	atomic.AddInt64(&counter, 1)
 
-	// cw.mu.Lock()
-	// defer cw.mu.Unlock()
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
 
 	ww := newWriter(w, id)
 	cw.writers = append(cw.writers, ww)
@@ -131,31 +118,26 @@ func (cw *coalescer) Header() http.Header {
 
 func (cw *coalescer) Write(p []byte) (int, error) {
 	log.Println("broadcastwriter: Write(), wroteHeader:", atomic.LoadUint32(&cw.wroteHeader))
-	if atomic.LoadUint32(&cw.wroteHeader) == 0 {
-		cw.WriteHeader(http.StatusOK)
+	if atomic.CompareAndSwapUint32(&cw.wroteHeader, 0, 1) {
+		cw.writeHeader(http.StatusOK)
 	}
 	return cw.bufw.Write(p)
 }
 
 func (cw *coalescer) WriteHeader(status int) {
-	log.Println("broadcastwriter: WriterHeader(), wroteHeader:", atomic.LoadUint32(&cw.wroteHeader))
-
-	cw.mu.Lock()
-	defer cw.mu.Unlock()
-
 	if !atomic.CompareAndSwapUint32(&cw.wroteHeader, 0, 1) {
 		return
 	}
+	cw.writeHeader(status)
+}
 
-	// if atomic.LoadUint32(&cw.wroteHeader) > 0 {
-	// 	return
-	// }
-	// atomic.AddUint32(&cw.wroteHeader, 1)
+func (cw *coalescer) writeHeader(status int) {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+
+	log.Println("broadcastwriter: WriterHeader(), wroteHeader:", atomic.LoadUint32(&cw.wroteHeader))
 
 	log.Println("listeners...?", len(cw.writers))
-
-	// w.mu.Lock()
-	// defer w.mu.Unlock()
 
 	for _, ww := range cw.writers {
 		log.Printf("=====> writeHeader() id:%d", ww.ID)
@@ -164,7 +146,7 @@ func (cw *coalescer) WriteHeader(status int) {
 			for k, v := range header {
 				h[k] = v
 			}
-			h["X-Coalesce"] = []string{"hit"}
+			// h["X-Coalesce"] = []string{"hit"}
 			h["X-ID"] = []string{fmt.Sprintf("%d", ww.ID)}
 
 			ww.WriteHeader(status)
@@ -178,23 +160,13 @@ func (cw *coalescer) WriteHeader(status int) {
 // but first, how does Flush() operate normally?
 // what happens to connections normally after a request..? etc.?
 func (cw *coalescer) Flush() {
-	// if atomic.LoadUint32(&cw.flushed) > 0 {
-	// 	// TODO: should we print an error or something...?
-	// 	return
-	// }
-	// atomic.AddUint32(&cw.flushed, 1)
-
 	if !atomic.CompareAndSwapUint32(&cw.flushed, 0, 1) {
 		return
 	}
 
 	if atomic.CompareAndSwapUint32(&cw.wroteHeader, 0, 1) {
-		cw.WriteHeader(http.StatusOK)
+		cw.writeHeader(http.StatusOK)
 	}
-
-	// if atomic.LoadUint32(&cw.wroteHeader) == 0 {
-	// 	cw.WriteHeader(http.StatusOK)
-	// }
 
 	log.Println("flushing..")
 
@@ -202,20 +174,12 @@ func (cw *coalescer) Flush() {
 
 	for _, ww := range cw.writers {
 		go func(ww *writer, data []byte) {
-			log.Printf("=====> write() id:%d", ww.ID) //, "-", string(data))
-
 			// Block until the header has been written
 			<-ww.wroteHeaderCh
-			// close(ww.wroteHeaderCh)
-
-			log.Printf("=====> write() ww.Write(data) for id:%d", ww.ID)
 
 			// Write the data to the original response writer
 			// and signal to the flush channel once complete.
 			ww.Write(data)
-
-			log.Printf("=====> write() closing flushedCh for id:%d", ww.ID)
-
 			close(ww.flushedCh)
 		}(ww, data)
 	}
@@ -223,6 +187,11 @@ func (cw *coalescer) Flush() {
 
 func (cw *coalescer) Flushed() <-chan struct{} {
 	return cw.writers[0].flushedCh
+}
+
+type request struct {
+	Method string
+	URI    string
 }
 
 type writer struct {
@@ -244,8 +213,4 @@ func newWriter(w http.ResponseWriter, id int64) *writer {
 
 func (ww *writer) Flushed() <-chan struct{} {
 	return ww.flushedCh
-}
-
-func (ww *writer) TmpCloseFlushCh() {
-	close(ww.flushedCh)
 }
