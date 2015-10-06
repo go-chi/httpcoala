@@ -1,6 +1,6 @@
 package httpjoin
 
-// package httpcoalescer
+// package httpcoala
 
 import (
 	"bytes"
