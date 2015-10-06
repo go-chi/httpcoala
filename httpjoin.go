@@ -1,4 +1,6 @@
-package httpjoin // name..? broadcaster ..? uniquerequest ..? uniquehttp ?
+package httpjoin
+
+// package httpcoalescer
 
 import (
 	"bytes"
@@ -15,10 +17,13 @@ import (
 //       "" - varnish?
 //       "" - haproxy?
 
+// TODO: will this work with consistentrd ..?
+
 var (
 	counter int64 = 1
 )
 
+// TODO: rename to Route
 func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 	var requestsMu sync.Mutex
 	requests := make(map[string]*BroadcastWriter)
@@ -32,11 +37,11 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 			var reqKey = fmt.Sprintf("%s %s", r.Method, r.URL.RequestURI())
 			var bw *BroadcastWriter
 			var lw *listener
-			var ok bool
+			var exists bool
 
 			requestsMu.Lock()
-			bw, ok = requests[reqKey]
-			if ok {
+			bw, exists = requests[reqKey]
+			if exists {
 				id := atomic.LoadInt64(&counter)
 				atomic.AddInt64(&counter, 1)
 
@@ -44,14 +49,20 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 				x := bw.AddListener(lw)
 				if !x {
 					// panic("couldnt add listener..")
-					ok = false
+					exists = false
+					lw = nil
 				}
 				// TODO: if false.. then, just go to next.ServeHTTP(w, r)
 				// ...
 			}
+			if !exists {
+				log.Println("!!!!! SET requests[reqKey] !!!!!")
+				bw = NewBroadcastWriter(w)
+				requests[reqKey] = bw
+			}
 			requestsMu.Unlock()
 
-			if ok { // or lw != nil ...?
+			if exists { // or lw != nil
 				// existing request listening for the stuff..
 				log.Println("waiting for existing request..")
 
@@ -64,19 +75,9 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 				// to stop the first handler, which will broadcast
 				// all others.
 
-				select {
-				case <-lw.Flushed():
-					return
-				}
+				<-lw.Flushed()
 				return
 			}
-
-			bw = NewBroadcastWriter(w)
-
-			requestsMu.Lock()
-			log.Println("!!!!! SET requests[reqKey] !!!!!")
-			requests[reqKey] = bw
-			requestsMu.Unlock()
 
 			log.Println("sending request to next.ServeHTTP(bw,r)")
 			next.ServeHTTP(bw, r)
@@ -88,14 +89,17 @@ func Broadcast(methods ...string) func(next http.Handler) http.Handler {
 			requestsMu.Unlock()
 
 			bw.Flush()
-			select {
-			case <-bw.Flushed():
-				return
-			}
+			<-bw.Flushed()
+			return
+			// select {
+			// case <-bw.Flushed():
+			// 	return
+			// }
 		})
 	}
 }
 
+// TODO: rename to responseCoalescer
 type BroadcastWriter struct { // Rename Broadcaster ...?
 	listeners []*listener
 	header    http.Header
@@ -118,6 +122,8 @@ func NewBroadcastWriter(w http.ResponseWriter) *BroadcastWriter {
 	}
 }
 
+// TODO: take a standard http.ResponseWriter here instead..
+// return *listener, bool
 func (w *BroadcastWriter) AddListener(lw *listener) bool {
 	if atomic.LoadUint32(&w.wroteHeader) > 0 {
 		return false
@@ -132,7 +138,7 @@ func (w *BroadcastWriter) AddListener(lw *listener) bool {
 }
 
 func (w *BroadcastWriter) Header() http.Header {
-	return w.header
+	return w.header // could use original response here..?
 }
 
 func (w *BroadcastWriter) Write(p []byte) (int, error) {
@@ -168,6 +174,8 @@ func (w *BroadcastWriter) WriteHeader(status int) {
 			lw.wroteHeaderCh <- struct{}{}
 		}(lw, status, w.header)
 	}
+
+	// hmm.. do we call w.Response.WriteHeader(200) ..?
 }
 
 // how does http streaming work...? can we broadcast streaming...?
@@ -196,22 +204,28 @@ func (w *BroadcastWriter) Flush() {
 		go func(lw *listener, data []byte) {
 			// Block until the header has been written
 			<-lw.wroteHeaderCh
-			close(lw.wroteHeaderCh) // ..?
+			close(lw.wroteHeaderCh)
 
 			log.Println("=====> write()", lw.ID, "-", string(data))
 
+			// Write the data to the original response writer
+			// and signal to the flush channel once complete.
 			lw.Write(data)
-
 			lw.flushedCh <- struct{}{}
 			close(lw.flushedCh)
 		}(lw, data)
 	}
+
+	// write with actual response..?
+	// the benefit is, if there are no listeners, we dont
+	// spin up unnecessary goroutines..
 }
 
 func (w *BroadcastWriter) Flushed() <-chan struct{} {
 	return w.listeners[0].flushedCh
 }
 
+// TODO: rename writer   ...?
 type listener struct {
 	ID int64
 	http.ResponseWriter
@@ -232,7 +246,3 @@ func newListener(w http.ResponseWriter, id int64) *listener {
 func (lw *listener) Flushed() <-chan struct{} {
 	return lw.flushedCh
 }
-
-// TODO: gotta implement Write() and WriteHeader() ...
-// just to block on headerSentCh()
-// .. and to close it..?
