@@ -42,6 +42,7 @@ func Route(methods ...string) func(next http.Handler) http.Handler {
 			cw, exists = requests[reqKey]
 			if exists {
 				ww, exists = cw.AddWriter(w)
+				delete(requests, reqKey)
 			}
 			if !exists {
 				log.Println("!!!!! SET requests[reqKey] !!!!!") //, len(cw.writers))
@@ -102,7 +103,8 @@ type coalescer struct {
 	wroteHeader uint32
 	flushed     uint32
 
-	mu sync.Mutex
+	mu   sync.Mutex
+	once sync.Once
 }
 
 func newCoalescer(w http.ResponseWriter) *coalescer {
@@ -127,6 +129,9 @@ func (cw *coalescer) AddWriter(w http.ResponseWriter) (*writer, bool) {
 	id := atomic.LoadInt64(&counter)
 	atomic.AddInt64(&counter, 1)
 
+	// cw.mu.Lock()
+	// defer cw.mu.Unlock()
+
 	ww := newWriter(w, id)
 	cw.writers = append(cw.writers, ww)
 	return ww, true
@@ -138,39 +143,46 @@ func (cw *coalescer) Header() http.Header {
 
 func (cw *coalescer) Write(p []byte) (int, error) {
 	log.Println("broadcastwriter: Write(), wroteHeader:", atomic.LoadUint32(&cw.wroteHeader))
-	if atomic.LoadUint32(&cw.wroteHeader) == 0 {
-		cw.WriteHeader(http.StatusOK)
-	}
+	// if atomic.LoadUint32(&cw.wroteHeader) == 0 {
+	// 	cw.WriteHeader(http.StatusOK)
+	// }
 	return cw.bufw.Write(p)
 }
 
 func (cw *coalescer) WriteHeader(status int) {
 	log.Println("broadcastwriter: WriterHeader(), wroteHeader:", atomic.LoadUint32(&cw.wroteHeader))
-	if atomic.LoadUint32(&cw.wroteHeader) > 0 {
-		return
-	}
-	atomic.AddUint32(&cw.wroteHeader, 1)
 
-	log.Println("listeners...?", len(cw.writers))
+	cw.once.Do(func() {
+		if !atomic.CompareAndSwapUint32(&cw.wroteHeader, 0, 1) {
+			return
+		}
 
-	// w.mu.Lock()
-	// defer w.mu.Unlock()
+		// if atomic.LoadUint32(&cw.wroteHeader) > 0 {
+		// 	return
+		// }
+		// atomic.AddUint32(&cw.wroteHeader, 1)
 
-	for _, ww := range cw.writers {
-		log.Printf("=====> writeHeader() id:%d", ww.ID)
-		go func(ww *writer, status int, header http.Header) {
-			h := map[string][]string(ww.Header())
-			for k, v := range header {
-				h[k] = v
-			}
-			h["X-Coalesce"] = []string{"hit"}
-			h["X-ID"] = []string{fmt.Sprintf("%d", ww.ID)}
+		log.Println("listeners...?", len(cw.writers))
 
-			ww.WriteHeader(status)
-			// ww.wroteHeaderCh <- struct{}{}
-			close(ww.wroteHeaderCh)
-		}(ww, status, cw.header)
-	}
+		// w.mu.Lock()
+		// defer w.mu.Unlock()
+
+		for _, ww := range cw.writers {
+			log.Printf("=====> writeHeader() id:%d", ww.ID)
+			go func(ww *writer, status int, header http.Header) {
+				h := map[string][]string(ww.Header())
+				for k, v := range header {
+					h[k] = v
+				}
+				h["X-Coalesce"] = []string{"hit"}
+				h["X-ID"] = []string{fmt.Sprintf("%d", ww.ID)}
+
+				ww.WriteHeader(status)
+				// ww.wroteHeaderCh <- struct{}{}
+				close(ww.wroteHeaderCh)
+			}(ww, status, cw.header)
+		}
+	})
 }
 
 // how does http streaming work...? can we broadcast streaming...?
@@ -178,15 +190,23 @@ func (cw *coalescer) WriteHeader(status int) {
 // but first, how does Flush() operate normally?
 // what happens to connections normally after a request..? etc.?
 func (cw *coalescer) Flush() {
-	if atomic.LoadUint32(&cw.flushed) > 0 {
-		// TODO: should we print an error or something...?
+	// if atomic.LoadUint32(&cw.flushed) > 0 {
+	// 	// TODO: should we print an error or something...?
+	// 	return
+	// }
+	// atomic.AddUint32(&cw.flushed, 1)
+
+	if !atomic.CompareAndSwapUint32(&cw.flushed, 0, 1) {
 		return
 	}
-	atomic.AddUint32(&cw.flushed, 1)
 
-	if atomic.LoadUint32(&cw.wroteHeader) == 0 {
+	if atomic.CompareAndSwapUint32(&cw.wroteHeader, 0, 1) {
 		cw.WriteHeader(http.StatusOK)
 	}
+
+	// if atomic.LoadUint32(&cw.wroteHeader) == 0 {
+	// 	cw.WriteHeader(http.StatusOK)
+	// }
 
 	log.Println("flushing..")
 
@@ -203,10 +223,15 @@ func (cw *coalescer) Flush() {
 			<-ww.wroteHeaderCh
 			// close(ww.wroteHeaderCh)
 
+			log.Printf("=====> write() ww.Write(data) for id:%d", ww.ID)
+
 			// Write the data to the original response writer
 			// and signal to the flush channel once complete.
 			ww.Write(data)
 			// ww.flushedCh <- struct{}{}
+
+			log.Printf("=====> write() closing flushedCh for id:%d", ww.ID)
+
 			close(ww.flushedCh)
 		}(ww, data)
 	}
