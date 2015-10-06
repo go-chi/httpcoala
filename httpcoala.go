@@ -16,6 +16,9 @@ import (
 
 // TODO: closing these connections...?
 
+// TODO: what happens if something panics in the app handler..? add test case.
+// can we close the others..?
+
 var (
 	counter int64 = 1
 )
@@ -41,15 +44,15 @@ func Route(methods ...string) func(next http.Handler) http.Handler {
 				ww, exists = cw.AddWriter(w)
 			}
 			if !exists {
-				log.Println("!!!!! SET requests[reqKey] !!!!!")
+				log.Println("!!!!! SET requests[reqKey] !!!!!") //, len(cw.writers))
 				cw = newCoalescer(w)
 				requests[reqKey] = cw
 			}
 			requestsMu.Unlock()
 
-			if ww != nil { // or lw != nil
+			if ww != nil {
 				// existing request listening for the stuff..
-				log.Println("waiting for existing request..")
+				log.Printf("waiting for existing request id:%d", ww.ID)
 
 				// TODO: hmm.. do we have a listener timeout..?
 				// after that point, we close it up.. etc..?
@@ -65,7 +68,7 @@ func Route(methods ...string) func(next http.Handler) http.Handler {
 					case <-ww.Flushed():
 						return
 					case <-time.After(3 * time.Second):
-						log.Println("********************************** FORCE CLOSE *******************", ww.ID)
+						log.Printf("********************************** FORCE CLOSE ******************* id:%d", ww.ID)
 						ww.TmpCloseFlushCh()
 					}
 				}
@@ -82,6 +85,8 @@ func Route(methods ...string) func(next http.Handler) http.Handler {
 			delete(requests, reqKey)
 			requestsMu.Unlock()
 
+			// TODO: hmm. put this in a defer func() {} ..?
+			// same with requestsMu ..? and put it above next.ServeHTTP() ..?
 			cw.Flush()
 			<-cw.Flushed()
 			return
@@ -112,14 +117,12 @@ func newCoalescer(w http.ResponseWriter) *coalescer {
 }
 
 func (cw *coalescer) AddWriter(w http.ResponseWriter) (*writer, bool) {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+
 	if atomic.LoadUint32(&cw.wroteHeader) > 0 {
 		return nil, false
 	}
-
-	// note: we need to synchronize the listeners..
-	// needed....? i think so..
-	cw.mu.Lock()
-	defer cw.mu.Unlock()
 
 	id := atomic.LoadInt64(&counter)
 	atomic.AddInt64(&counter, 1)
@@ -154,7 +157,7 @@ func (cw *coalescer) WriteHeader(status int) {
 	// defer w.mu.Unlock()
 
 	for _, ww := range cw.writers {
-		log.Println("=====> writeHeader()", ww.ID)
+		log.Printf("=====> writeHeader() id:%d", ww.ID)
 		go func(ww *writer, status int, header http.Header) {
 			h := map[string][]string(ww.Header())
 			for k, v := range header {
@@ -194,7 +197,7 @@ func (cw *coalescer) Flush() {
 
 	for _, ww := range cw.writers {
 		go func(ww *writer, data []byte) {
-			log.Println("=====> write()", ww.ID) //, "-", string(data))
+			log.Printf("=====> write() id:%d", ww.ID) //, "-", string(data))
 
 			// Block until the header has been written
 			<-ww.wroteHeaderCh
@@ -221,7 +224,7 @@ type writer struct {
 }
 
 func newWriter(w http.ResponseWriter, id int64) *writer {
-	log.Println("newWriter, id:", id)
+	log.Printf("newWriter, id:%d", id)
 	return &writer{
 		ID:             id,
 		ResponseWriter: w,
