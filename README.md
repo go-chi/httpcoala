@@ -26,7 +26,8 @@ func main() {
 	r := cji.NewRouter()
 
 	r.Use(middleware.Logger)
-	r.Use(httpcoala.Route("GET"))
+	r.Use(httpcoala.Route("HEAD", "GET")) // or, Route("*")
+	// r.Use(otherMiddleware)
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond) // expensive op
@@ -50,6 +51,11 @@ on a web service that downloads an image and returns a resized version.
 Without httpcoala middleware, Requests/sec:   7081.09
    With httpcoala middleware, Requests/sec:  18373.87
 ```
+
+# TODO
+
+* Allow a request key to be passed that determines when to coalesce requests.
+  It would allow for more control such as grouping by a query param or header.
 
 # License
 

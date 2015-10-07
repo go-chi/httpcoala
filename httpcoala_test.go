@@ -11,7 +11,7 @@ import (
 )
 
 func TestHandler(t *testing.T) {
-	var numRequests = 10
+	var numRequests = 30
 
 	var hits uint32
 	var expectedStatus int = 201
@@ -93,15 +93,15 @@ func TestHandler(t *testing.T) {
 
 	wg.Wait()
 
-	// totalHits := atomic.LoadUint32(&hits)
+	totalHits := atomic.LoadUint32(&hits)
 	// if totalHits > 1 {
 	// 	t.Error("handler was hit more than once. hits:", totalHits)
 	// }
+	log.Println("total hits:", totalHits)
 
 	finalCount := atomic.LoadUint32(&count)
 	if finalCount > 0 {
 		t.Error("queue count was expected to be empty, but count:", finalCount)
 	}
-
 	log.Println("final count:", finalCount)
 }

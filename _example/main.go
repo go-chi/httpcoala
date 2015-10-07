@@ -13,7 +13,7 @@ func main() {
 	r := cji.NewRouter()
 
 	r.Use(middleware.Logger)
-	r.Use(httpcoala.Route("GET"))
+	r.Use(httpcoala.Route("HEAD", "GET")) // or, Route("*")
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond) // expensive op
