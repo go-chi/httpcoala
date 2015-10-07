@@ -8,7 +8,7 @@ HTTP Coala is a middleware handler that routes multiple requests for the same UR
 for every web service or handler chain, but for the computationally expensive
 handlers that always yield the same response, HTTP Coala will give you a speed boost.
 
-It's is common among HTTP reverse proxy cache servers such as nginx,
+It's common among HTTP reverse proxy cache servers such as nginx,
 Squid or Varnish - they all call it something else but works similarly.
 
 * https://www.varnish-cache.org/docs/3.0/tutorial/handling_misbehaving_servers.html
