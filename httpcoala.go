@@ -202,8 +202,8 @@ type standbyWriter struct {
 func newStandbyWriter(w http.ResponseWriter) *standbyWriter {
 	return &standbyWriter{
 		ResponseWriter: w,
-		wroteHeaderCh:  make(chan struct{}, 1),
-		flushedCh:      make(chan struct{}, 1),
+		wroteHeaderCh:  make(chan struct{}, 0),
+		flushedCh:      make(chan struct{}, 0),
 	}
 }
 
