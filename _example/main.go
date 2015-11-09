@@ -5,12 +5,12 @@ import (
 	"time"
 
 	"github.com/goware/httpcoala"
-	"github.com/pressly/cji"
-	"github.com/zenazn/goji/web/middleware"
+	"github.com/pressly/chi"
+	"github.com/pressly/chi/middleware"
 )
 
 func main() {
-	r := cji.NewRouter()
+	r := chi.NewRouter()
 
 	r.Use(middleware.Logger)
 	r.Use(httpcoala.Route("HEAD", "GET")) // or, Route("*")
