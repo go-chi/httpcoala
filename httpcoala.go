@@ -10,8 +10,8 @@ import (
 
 // Route middleware handler will coalesce multiple requests for the same URI
 // (and routed methods) to be processed as a single request.
-func Route(methods ...string) func(next http.Handler) http.Handler {
-	coalescer := newCoalescer(methods...)
+func Route(methods []string, keytypes []KeyTypes) func(next http.Handler) http.Handler {
+	coalescer := newCoalescer(methods, keytypes)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +35,7 @@ func Route(methods ...string) func(next http.Handler) http.Handler {
 	}
 }
 
-func newCoalescer(methods ...string) *coalescer {
+func newCoalescer(methods []string, keytypes []KeyTypes) *coalescer {
 	methodMap := make(map[string]struct{})
 	for _, m := range methods {
 		if m == "*" {
@@ -46,13 +46,24 @@ func newCoalescer(methods ...string) *coalescer {
 	return &coalescer{
 		methodMap: methodMap,
 		requests:  make(map[request]*batchWriter),
+		keys:      keytypes,
 	}
 }
+
+type KeyTypes int
+
+const (
+	Method KeyTypes = 1 + iota
+	URI
+	HOST
+	UA
+)
 
 type coalescer struct {
 	mu        sync.Mutex
 	methodMap map[string]struct{}
 	requests  map[request]*batchWriter
+	keys      []KeyTypes
 }
 
 func (c *coalescer) Route(w http.ResponseWriter, r *http.Request) (*batchWriter, *standbyWriter, bool) {
@@ -60,7 +71,20 @@ func (c *coalescer) Route(w http.ResponseWriter, r *http.Request) (*batchWriter,
 		return nil, nil, false
 	}
 
-	var reqKey = request{r.Method, r.URL.RequestURI()}
+	reqKey := request{}
+	for _, v := range c.keys {
+		switch v {
+		case Method:
+			reqKey.Method = r.Method
+		case URI:
+			reqKey.URI = r.URL.RequestURI()
+		case HOST:
+			reqKey.HOST = r.Host
+		case UA:
+			reqKey.UA = r.UserAgent()
+		default:
+		}
+	}
 	var bw *batchWriter
 	var sw *standbyWriter
 	var found bool
@@ -82,7 +106,20 @@ func (c *coalescer) Route(w http.ResponseWriter, r *http.Request) (*batchWriter,
 
 func (c *coalescer) Flush(bw *batchWriter, r *http.Request) {
 	c.mu.Lock()
-	reqKey := request{r.Method, r.URL.RequestURI()}
+	reqKey := request{}
+	for _, v := range c.keys {
+		switch v {
+		case Method:
+			reqKey.Method = r.Method
+		case URI:
+			reqKey.URI = r.URL.RequestURI()
+		case HOST:
+			reqKey.HOST = r.Host
+		case UA:
+			reqKey.UA = r.UserAgent()
+		default:
+		}
+	}
 	delete(c.requests, reqKey)
 	c.mu.Unlock()
 
@@ -93,6 +130,8 @@ func (c *coalescer) Flush(bw *batchWriter, r *http.Request) {
 type request struct {
 	Method string
 	URI    string
+	HOST   string
+	UA     string
 }
 
 type batchWriter struct {
