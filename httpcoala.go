@@ -191,6 +191,7 @@ func (bw *batchWriter) writeHeader(status int) {
 	bw.mu.Lock()
 	defer bw.mu.Unlock()
 
+	isCoalesce := false
 	// Broadcast WriteHeader to standby writers
 	for _, sw := range bw.writers {
 		bw.wg.Add(1)
@@ -201,7 +202,12 @@ func (bw *batchWriter) writeHeader(status int) {
 			for k, v := range header {
 				h[k] = v
 			}
-			// h["X-Coalesce"] = []string{"hit"}
+
+			// Write hit headers to standby writers
+			if isCoalesce {
+				h["X-Coalesce"] = []string{"HIT"}
+			}
+			isCoalesce = true
 
 			sw.WriteHeader(status)
 			close(sw.wroteHeaderCh)
