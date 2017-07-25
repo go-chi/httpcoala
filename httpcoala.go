@@ -143,6 +143,7 @@ type batchWriter struct {
 	flushed     uint32
 
 	mu sync.Mutex
+	wg sync.WaitGroup
 }
 
 func newBatchWriter(w http.ResponseWriter) *batchWriter {
@@ -192,7 +193,10 @@ func (bw *batchWriter) writeHeader(status int) {
 
 	// Broadcast WriteHeader to standby writers
 	for _, sw := range bw.writers {
+		bw.wg.Add(1)
 		go func(sw *standbyWriter, status int, header http.Header) {
+			defer bw.wg.Done()
+
 			h := map[string][]string(sw.Header())
 			for k, v := range header {
 				h[k] = v
@@ -203,6 +207,7 @@ func (bw *batchWriter) writeHeader(status int) {
 			close(sw.wroteHeaderCh)
 		}(sw, status, bw.header)
 	}
+	bw.wg.Wait()
 }
 
 func (bw *batchWriter) Flush() {
