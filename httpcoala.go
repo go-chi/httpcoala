@@ -6,11 +6,15 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+var timeout time.Duration = 60000 * time.Microsecond
 
 // Route middleware handler will coalesce multiple requests for the same URI
 // (and routed methods) to be processed as a single request.
-func Route(methods []string, keytypes []KeyTypes) func(next http.Handler) http.Handler {
+func Route(methods []string, keytypes []KeyTypes, t time.Duration) func(next http.Handler) http.Handler {
+	timeout = t
 	coalescer := newCoalescer(methods, keytypes)
 
 	return func(next http.Handler) http.Handler {
@@ -195,25 +199,34 @@ func (bw *batchWriter) writeHeader(status int) {
 	// Broadcast WriteHeader to standby writers
 	for _, sw := range bw.writers {
 		bw.wg.Add(1)
-		go func(sw *standbyWriter, status int, header http.Header) {
-			defer bw.wg.Done()
-
-			h := map[string][]string(sw.Header())
-			for k, v := range header {
-				h[k] = v
-			}
-
-			// Write hit headers to standby writers
-			if isCoalesce {
-				h["X-Coalesce"] = []string{"HIT"}
-			}
-			isCoalesce = true
-
-			sw.WriteHeader(status)
-			close(sw.wroteHeaderCh)
-		}(sw, status, bw.header)
+		go write(bw, sw, status, bw.header, &isCoalesce)
 	}
 	bw.wg.Wait()
+}
+
+func write(bw *batchWriter, sw *standbyWriter, status int, header http.Header, isCoalesce *bool) {
+	defer bw.wg.Done()
+	done := make(chan struct{}, 0)
+	go func(sw *standbyWriter, status int, header http.Header, isCoalesce *bool) {
+		defer close(done)
+
+		h := map[string][]string(sw.Header())
+		for k, v := range header {
+			h[k] = v
+		}
+		// Write hit headers to standby writers
+		if *isCoalesce {
+			h["X-Coalesce"] = []string{"HIT"}
+		}
+		*isCoalesce = true
+		sw.WriteHeader(status)
+		close(sw.wroteHeaderCh)
+	}(sw, status, bw.header, isCoalesce)
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
 }
 
 func (bw *batchWriter) Flush() {
