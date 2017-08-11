@@ -26,7 +26,7 @@ func main() {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logger)
-	r.Use(httpcoala.Route("HEAD", "GET")) // or, Route("*")
+	r.Use(httpcoala.Route(Route([]string{"HEAD","GET"}, []KeyTypes{Method,URI}) // or, Route([]string{"*"}, []KeyTypes{Method,URI})
 	// r.Use(otherMiddleware)
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {

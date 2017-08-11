@@ -54,7 +54,7 @@ func TestHandler(t *testing.T) {
 		})
 	}
 
-	ts := httptest.NewServer(counter(recoverer(Route("GET")(http.HandlerFunc(app)))))
+	ts := httptest.NewServer(counter(recoverer(Route([]string{"GET"}, []KeyTypes{Method,URI,HOST,UA})(http.HandlerFunc(app)))))
 	defer ts.Close()
 
 	var wg sync.WaitGroup
