@@ -60,7 +60,7 @@ func (c *coalescer) Route(w http.ResponseWriter, r *http.Request) (*batchWriter,
 		return nil, nil, false
 	}
 
-	var reqKey = request{r.Method, r.URL.RequestURI()}
+	var reqKey = request{r.Method, r.Host + "/" + r.URL.RequestURI()}
 	var bw *batchWriter
 	var sw *standbyWriter
 	var found bool
