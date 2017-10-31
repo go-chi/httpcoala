@@ -60,7 +60,7 @@ func (c *coalescer) Route(w http.ResponseWriter, r *http.Request) (*batchWriter,
 		return nil, nil, false
 	}
 
-	var reqKey = request{r.Method, r.Host + "/" + r.URL.RequestURI()}
+	var reqKey = request{Method: r.Method, Host: r.Host, URI: r.URL.RequestURI()}
 	var bw *batchWriter
 	var sw *standbyWriter
 	var found bool
@@ -82,7 +82,7 @@ func (c *coalescer) Route(w http.ResponseWriter, r *http.Request) (*batchWriter,
 
 func (c *coalescer) Flush(bw *batchWriter, r *http.Request) {
 	c.mu.Lock()
-	reqKey := request{r.Method, r.URL.RequestURI()}
+	reqKey := request{Method: r.Method, Host: r.Host, URI: r.URL.RequestURI()}
 	delete(c.requests, reqKey)
 	c.mu.Unlock()
 
@@ -92,6 +92,7 @@ func (c *coalescer) Flush(bw *batchWriter, r *http.Request) {
 
 type request struct {
 	Method string
+	Host   string
 	URI    string
 }
 
