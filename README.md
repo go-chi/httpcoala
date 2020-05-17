@@ -1,7 +1,7 @@
 HTTP Coala
 ==========
 
-**NOTE: a new an improved implementation is available at [https://github.com/go-chi/stampede](https://github.com/go-chi/stampede)**
+**NOTE: a new and improved implementation is available at [https://github.com/go-chi/stampede](https://github.com/go-chi/stampede)**
 
 Just a little bit of performance enhancing middleware -- HTTP Coala (aka Coalescer).
 
