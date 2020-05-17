@@ -1,6 +1,8 @@
 HTTP Coala
 ==========
 
+**NOTE: a new an improved implementation is available at [https://github.com/go-chi/stampede](https://github.com/go-chi/stampede)**
+
 Just a little bit of performance enhancing middleware -- HTTP Coala (aka Coalescer).
 
 HTTP Coala is a middleware handler that routes multiple requests for the same URI
